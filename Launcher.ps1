@@ -4,7 +4,7 @@
 # Monta URLs raw com EscapeDataString por segmento (corrige espaços e caracteres especiais)
 # ===============================
 # Launcher.ps1 - Bootstrap mínimo para auto-elevação quando executado via: irm '<URL>' | iex
-$SELF_URL = 'https://raw.githubusercontent.com/DiegoGeset/Tool/refs/heads/main/Launcher.ps1'
+$SELF_URL = 'https://raw.githubusercontent.com/DiegoGeset/Tool/main/Launcher.ps1'
 
 # detecta qual executável PowerShell usar (prefere pwsh se instalado)
 $psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
