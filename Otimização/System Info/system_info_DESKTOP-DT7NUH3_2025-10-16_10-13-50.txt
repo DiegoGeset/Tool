@@ -1,0 +1,32 @@
+===== CPU =====
+Nome: AMD Athlon 3000G with Radeon Vega Graphics     
+Fabricante: AuthenticAMD
+Cores Físicos: 2
+Processadores Lógicos: 4
+Clock Máximo (GHz): 3.5
+Uso Atual (%): 
+
+===== MEMÓRIA RAM =====
+Total RAM (GB): 8
+Quantidade de Pentes: 
+Pente 1: 8 GB, Velocidade: 2400 MHz, Fabricante: Kingston
+
+===== SISTEMA =====
+Hostname: DESKTOP-DT7NUH3
+Proprietário Principal: Usuário do Windows
+Fabricante: Micro-Star International Co., Ltd.
+Modelo: MS-7B84
+Tipo do Sistema: x64-based PC
+
+===== DISPOSITIVOS DE ARMAZENAMENTO =====
+Nome: \\.\PHYSICALDRIVE0
+Modelo: KINGSTON SA400S37240G
+Tamanho (GB): 223.57
+Tipo: Fixed hard disk media
+-----------------------------
+Nome: \\.\PHYSICALDRIVE1
+Modelo: ST1000DM010-2EP102
+Tamanho (GB): 931.51
+Tipo: Fixed hard disk media
+-----------------------------
+Log salvo em: C:\Users\Usuário\Desktop\Lab\Otimização\System Info\system_info_DESKTOP-DT7NUH3_2025-10-16_10-13-50.txt

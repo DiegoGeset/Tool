@@ -1,0 +1,5 @@
+﻿# ============================================
+# Instalação de Programas via Powershell (Winget)
+# Realiza a instalação dos seguintes programas na ordem enumerada.
+# 1. Google Chrome 2.Microsoft Office LTSC Professional 3.Anydesk 4.Java 8 5.Ccleaner 6.7-zip 7.Adobe Reader
+# ============================================

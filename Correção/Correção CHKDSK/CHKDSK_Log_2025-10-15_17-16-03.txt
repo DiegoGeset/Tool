@@ -1,0 +1,5 @@
+================ CHKDSK - Início 10/15/2025 17:16:04 ================
+Discos e volumes disponíveis:
+Letra: D | Nome: Dados | Tamanho: 931,51 GB | Livre: 6,63 GB
+Letra: C | Nome:  | Tamanho: 98,84 GB | Livre: 8,76 GB
+Executando CHKDSK na unidade C: ...
