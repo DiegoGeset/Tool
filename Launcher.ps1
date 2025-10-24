@@ -1,44 +1,240 @@
-﻿# ===============================
-# GESET Launcher - Interface WPF (Tema Escuro + Ocultação e Elevação)
 # ===============================
+# GESET Launcher - Interface WPF (Tema Escuro + Ocultação e Elevação)
+# Usa JSON remoto (structure.json) como fonte da estrutura do repositório
+# Monta URLs raw com EscapeDataString por segmento (corrige espaços e caracteres especiais)
+# ===============================
+# Launcher.ps1 - Bootstrap mínimo para auto-elevação quando executado via: irm '<URL>' | iex
+$SELF_URL = 'https://raw.githubusercontent.com/DiegoGeset/Tool/refs/heads/main/Launcher.ps1'
 
-# --- Oculta a janela do PowerShell ---
-$signature = @"
-[DllImport("kernel32.dll")]
-public static extern IntPtr GetConsoleWindow();
-[DllImport("user32.dll")]
-public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-"@
-Add-Type -MemberDefinition $signature -Name "Win32" -Namespace "PInvoke"
-$consolePtr = [PInvoke.Win32]::GetConsoleWindow()
-# 0 = Esconde, 5 = Mostra
-[PInvoke.Win32]::ShowWindow($consolePtr, 0)
+# detecta qual executável PowerShell usar (prefere pwsh se instalado)
+$psExe = (Get-Command pwsh.exe -ErrorAction SilentlyContinue).Source
+if (-not $psExe) { $psExe = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Source }
 
-# --- Verifica se está em modo Administrador ---
-$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Add-Type -AssemblyName PresentationFramework
-    [System.Windows.MessageBox]::Show("O Launcher precisa ser executado como Administrador.`nEle será reiniciado com permissões elevadas.", "Permissão necessária", "OK", "Warning")
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-ExecutionPolicy Bypass -File `"$PSCommandPath`""
-    $psi.Verb = "runas"
-    [System.Diagnostics.Process]::Start($psi) | Out-Null
+# checa elevação
+$isAdmin = (New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    # monta comando idêntico ao usado pelo usuário e relança elevado
+    $plain = "irm '$SELF_URL' | iex"
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($plain))
+    Start-Process -FilePath $psExe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $enc" -Verb RunAs
     exit
 }
+
+# --- estamos elevados: opcionalmente oculta console (P/Invoke)
+$sig = @"
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+"@
+Add-Type -MemberDefinition $sig -Name Win32 -Namespace PInvoke
+[PInvoke.Win32]::ShowWindow([PInvoke.Win32]::GetConsoleWindow(),0)
 
 # ===============================
 # Dependências principais
 # ===============================
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
-$BasePath = Split-Path -Parent $MyInvocation.MyCommand.Definition
+# ===============================
+# Configuração: cache local e GitHub (raw)
+# ===============================
+$LocalCache = "C:\Geset"
+$BasePath = $LocalCache
+
+$LogPath = Join-Path $LocalCache "Logs"
+$LogFile = Join-Path $LogPath "Launcher.log"
+
+$RepoOwner = "DiegoGeset"
+$RepoName = "Tool"
+$Branch = "refs/heads/main"
+$GitHubRawBase = "https://raw.githubusercontent.com/$RepoOwner/$RepoName/$Branch"
+
+$Global:GitHubHeaders = @{ 'User-Agent' = 'GESET-Launcher' }
+
+# Garante pastas locais
+if (-not (Test-Path $LocalCache)) { New-Item -Path $LocalCache -ItemType Directory -Force | Out-Null }
+if (-not (Test-Path $LogPath)) { New-Item -Path $LogPath -ItemType Directory -Force | Out-Null }
+
+# Função de log simples (silencioso)
+function Write-Log {
+    param([string]$msg)
+    try {
+        $t = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        "$t`t$msg" | Out-File -FilePath $LogFile -Append -Encoding UTF8
+    } catch { }
+}
+
+Write-Log "Launcher iniciado."
 
 # ===============================
-# Funções utilitárias
+# Função: Atualiza/baixa structure.json do GitHub raw
+# - Se falhar e local existir, usa local
+# - Se falhar e não houver local, mostra erro e exit
+# ===============================
+function Update-StructureJson {
+    $localJson = Join-Path $LocalCache "structure.json"
+    $remoteJsonUrl = "$GitHubRawBase/structure.json"
+
+    try {
+        # baixa para temporário primeiro para evitar arquivos parcialmente escritos
+        $tmp = Join-Path $LocalCache "structure_tmp.json"
+        Invoke-WebRequest -Uri $remoteJsonUrl -Headers $Global:GitHubHeaders -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+
+        # se não existia ou diferente, substitui
+        $replace = $true
+        if (Test-Path $localJson) {
+            try {
+                $hashOld = (Get-FileHash $localJson -Algorithm MD5).Hash
+                $hashNew = (Get-FileHash $tmp -Algorithm MD5).Hash
+                if ($hashOld -eq $hashNew) { $replace = $false }
+            } catch { $replace = $true }
+        }
+
+        if ($replace) {
+            Copy-Item -Path $tmp -Destination $localJson -Force
+            Write-Log "structure.json atualizado a partir do GitHub."
+        } else {
+            Write-Log "structure.json local já está atualizado."
+        }
+
+        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    } catch {
+        Write-Log "Falha ao atualizar JSON remoto: $($_.Exception.Message)"
+        if (-not (Test-Path $localJson)) {
+            Add-Type -AssemblyName PresentationFramework
+            [System.Windows.MessageBox]::Show("Não foi possível obter o arquivo de estrutura JSON do GitHub e não existe arquivo local.", "Erro", "OK", "Error")
+            exit
+        } else {
+            Write-Log "Continuando com structure.json local já existente."
+        }
+    }
+
+    return $localJson
+}
+
+# ===============================
+# Função: Lê estrutura do JSON local e normaliza objetos
+# Formato esperado do JSON: array de objetos { categoria, subpasta, script, descricao }
+# (mantemos compatibilidade com nomes de campos em português)
+# ===============================
+function Get-StructureFromJson {
+    param([string]$jsonPath)
+
+    try {
+        $jsonContent = Get-Content $jsonPath -Raw | ConvertFrom-Json
+        if ($null -eq $jsonContent) { return @() }
+        $list = @()
+        foreach ($item in $jsonContent) {
+            # aceita tanto campos em português quanto em inglês (Category/Sub/ScriptName)
+            $cat = $item.categoria
+            if ($null -eq $cat) { $cat = $item.Category }
+            $sub = $item.subpasta
+            if ($null -eq $sub) { $sub = $item.Sub }
+            $script = $item.script
+            if ($null -eq $script) { $script = $item.ScriptName }
+            $desc = $item.descricao
+            if ($null -eq $desc) { $desc = $item.Description }
+
+            $list += [PSCustomObject]@{ Category = $cat; Sub = $sub; ScriptName = $script; Description = $desc }
+        }
+        return $list
+    } catch {
+        Write-Log "Falha ao ler JSON ($jsonPath): $($_.Exception.Message)"
+        return @()
+    }
+}
+
+# ===============================
+# Função: Cria estrutura local (pastas) conforme lista do JSON
+# ===============================
+function Ensure-LocalStructure {
+    param([array]$remoteList)
+
+    foreach ($entry in $remoteList) {
+        $cat = $entry.Category
+        $sub = $entry.Sub
+        if (-not $cat -or -not $sub) { continue }
+        $localDir = Join-Path $LocalCache ($cat + "\" + $sub)
+        if (-not (Test-Path $localDir)) {
+            try {
+                New-Item -Path $localDir -ItemType Directory -Force | Out-Null
+                Write-Log "Criada pasta local: $localDir"
+            } catch {
+                Write-Log "Falha ao criar pasta local: $localDir - $($_.Exception.Message)"
+            }
+        }
+    }
+}
+
+# ===============================
+# Função: Baixa script .ps1 (raw) para cache local e executa em nova janela elevada
+# - Sempre monta o rawUrl por segmento com EscapeDataString (evita links "bugados")
+# ===============================
+function Ensure-ScriptLocalAndExecute {
+    param([string]$Category, [string]$Sub, [string]$ScriptName)
+
+    $localDir = Join-Path $LocalCache ($Category + "\" + $Sub)
+    if (-not (Test-Path $localDir)) {
+        New-Item -Path $localDir -ItemType Directory -Force | Out-Null
+        Write-Log "Criada pasta forçada: $localDir"
+    }
+
+    $localScript = Join-Path $localDir $ScriptName
+
+    # Monta raw URL com escape para cada segmento
+    $catEsc = [System.Uri]::EscapeDataString($Category)
+    $subEsc = [System.Uri]::EscapeDataString($Sub)
+    $scriptEsc = [System.Uri]::EscapeDataString($ScriptName)
+    $rawUrl = "$GitHubRawBase/$catEsc/$subEsc/$scriptEsc"
+
+    $downloaded = $false
+    try {
+        Invoke-WebRequest -Uri $rawUrl -OutFile $localScript -UseBasicParsing -Headers $Global:GitHubHeaders -ErrorAction Stop
+        Write-Log "Baixado: $rawUrl -> $localScript"
+        $downloaded = $true
+    } catch {
+        Write-Log "Falha no download do script: $rawUrl - $($_.Exception.Message)"
+        $downloaded = $false
+    }
+
+    if (-not (Test-Path $localScript)) {
+        Write-Log "Script não disponível localmente e download falhou: $localScript"
+        Add-Type -AssemblyName PresentationFramework
+        [System.Windows.MessageBox]::Show("Não foi possível obter o script: $ScriptName`nVerifique sua conexão e tente novamente.", "Erro", "OK", "Error")
+        return
+    }
+
+    try {
+        Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"$localScript`"" -Verb RunAs
+        Write-Log "Executado: $localScript"
+    } catch {
+        Write-Log "Falha ao executar: $localScript - $($_.Exception.Message)"
+        Add-Type -AssemblyName PresentationFramework
+        [System.Windows.MessageBox]::Show("Falha ao executar o script: $ScriptName", "Erro", "OK", "Error")
+    }
+}
+
+# ===============================
+# Funções utilitárias originais mantidas
 # ===============================
 function Run-ScriptElevated($scriptPath) {
+    if ($scriptPath -and $scriptPath.StartsWith($LocalCache) -and -not (Test-Path $scriptPath)) {
+        # transformar localPath em Category/Sub/Script
+        $rel = $scriptPath.Substring($LocalCache.Length).TrimStart('\','/')
+        $parts = $rel -split '[\\/]'
+        if ($parts.Count -ge 3) {
+            $category = $parts[0]
+            $sub = $parts[1]
+            $scriptName = $parts[2..($parts.Count-1)] -join '\'
+            Ensure-ScriptLocalAndExecute -Category $category -Sub $sub -ScriptName $scriptName
+            return
+        } else {
+            Add-Type -AssemblyName PresentationFramework
+            [System.Windows.MessageBox]::Show("Arquivo não encontrado: $scriptPath", "Erro", "OK", "Error")
+            return
+        }
+    }
+
     if (-not (Test-Path $scriptPath)) {
+        Add-Type -AssemblyName PresentationFramework
         [System.Windows.MessageBox]::Show("Arquivo não encontrado: $scriptPath", "Erro", "OK", "Error")
         return
     }
@@ -46,9 +242,25 @@ function Run-ScriptElevated($scriptPath) {
 }
 
 function Get-InfoText($scriptPath) {
+    try {
+        if ($scriptPath -and ($scriptPath.StartsWith($LocalCache))) {
+            $rel = $scriptPath.Substring($LocalCache.Length).TrimStart('\','/')
+            $txtRel = [System.IO.Path]::ChangeExtension($rel, ".txt")
+            $segments = $txtRel -split '[\\/]'
+            $escaped = $segments | ForEach-Object { [System.Uri]::EscapeDataString($_) }
+            $rawUrl = "$GitHubRawBase/$($escaped -join '/')"
+            try {
+                $content = Invoke-RestMethod -Uri $rawUrl -Headers $Global:GitHubHeaders -ErrorAction Stop
+                if ($null -ne $content) { return $content.ToString() }
+            } catch {
+                # fallback local
+            }
+        }
+    } catch { }
+
     $txtFile = [System.IO.Path]::ChangeExtension($scriptPath, ".txt")
-    if (Test-Path $txtFile) { Get-Content $txtFile -Raw }
-    else { "Nenhuma documentação encontrada para este script." }
+    if (Test-Path $txtFile) { return (Get-Content $txtFile -Raw) }
+    else { return "Nenhuma documentação encontrada para este script." }
 }
 
 function Show-InfoWindow($title, $content) {
@@ -73,7 +285,11 @@ function Show-InfoWindow($title, $content) {
     $window.ShowDialog() | Out-Null
 }
 
-function Add-HoverShadow($button) {
+# ===============================
+# Função: Efeito hover para botões (mantida)
+# ===============================
+function Add-HoverShadow {
+    param($button)
     $button.Add_MouseEnter({
         $shadow = New-Object System.Windows.Media.Effects.DropShadowEffect
         $shadow.Color = [System.Windows.Media.Colors]::Black
@@ -87,7 +303,7 @@ function Add-HoverShadow($button) {
 }
 
 # ===============================
-# Janela principal
+# Janela principal (WPF) - estrutura visual idêntica ao original
 # ===============================
 $window = New-Object System.Windows.Window
 $window.Title = "GESET Launcher"
@@ -106,19 +322,17 @@ $mainGrid.RowDefinitions[1].Height = "*"
 $mainGrid.RowDefinitions[2].Height = "60"
 $window.Content = $mainGrid
 
-# ===============================
 # Cabeçalho
-# ===============================
 $topPanel = New-Object System.Windows.Controls.StackPanel
 $topPanel.Orientation = "Horizontal"
 $topPanel.HorizontalAlignment = "Center"
 $topPanel.VerticalAlignment = "Center"
 $topPanel.Margin = "0,15,0,15"
 
-$logoPath = Join-Path $BasePath "logo.png"
+$logoPath = Join-Path $BasePath "Logo.png"
 if (Test-Path $logoPath) {
     $logo = New-Object System.Windows.Controls.Image
-    $logo.Source = New-Object System.Windows.Media.Imaging.BitmapImage([Uri]$logoPath)
+    $logo.Source = New-Object System.Windows.Media.Imaging.BitmapImage([Uri]"file:///$logoPath")
     $logo.Width = 60
     $logo.Height = 60
     $logo.Margin = "0,0,10,0"
@@ -142,9 +356,7 @@ $topPanel.Children.Add($titleText)
 [System.Windows.Controls.Grid]::SetRow($topPanel, 0)
 $mainGrid.Children.Add($topPanel)
 
-# ===============================
 # Tabs - Categorias
-# ===============================
 $tabControl = New-Object System.Windows.Controls.TabControl
 $tabControl.Margin = "15,0,15,0"
 
@@ -198,9 +410,7 @@ $tabControl.Resources = [Windows.Markup.XamlReader]::Load($tabReader)
 [System.Windows.Controls.Grid]::SetRow($tabControl, 1)
 $mainGrid.Children.Add($tabControl)
 
-# ===============================
 # Estilo arredondado dos botões
-# ===============================
 $roundedStyle = @"
 <Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' TargetType='Button'>
     <Setter Property='Background' Value='#2E5D9F'/>
@@ -234,23 +444,32 @@ $roundedStyle = @"
 $styleReader = (New-Object System.Xml.XmlNodeReader ([xml]$roundedStyle))
 $roundedButtonStyle = [Windows.Markup.XamlReader]::Load($styleReader)
 
-# ===============================
 # Tema escuro padrão
-# ===============================
 $window.Background = "#0A1A33"
 $tabControl.Background = "#102A4D"
 $titleText.Foreground = "#FFFFFF"
 $shadowEffect.Color = [System.Windows.Media.Colors]::LightBlue
 
 # ===============================
-# Função para carregar categorias e scripts
+# Função para carregar categorias e scripts (mantendo lógica original)
 # ===============================
 $ScriptCheckBoxes = @{}
 function Load-Tabs {
     $tabControl.Items.Clear()
     $ScriptCheckBoxes.Clear()
 
-    $categories = Get-ChildItem -Path $BasePath -Directory | Where-Object { $_.Name -notin @("Logs") }
+    # Atualiza JSON e obtém estrutura
+    $jsonPath = Update-StructureJson
+    $remote = Get-StructureFromJson -jsonPath $jsonPath
+
+    if ($remote -and $remote.Count -gt 0) {
+        Ensure-LocalStructure -remoteList $remote
+    } else {
+        Write-Log "Remote vazio - mantendo estrutura local existente."
+    }
+
+    # Carrega categorias a partir de C:\Geset (assim como antes)
+    $categories = Get-ChildItem -Path $BasePath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -notin @("Logs") }
 
     foreach ($category in $categories) {
         $tab = New-Object System.Windows.Controls.TabItem
@@ -276,65 +495,110 @@ function Load-Tabs {
         $scrollViewer.Content = $panel
         $border.Child = $scrollViewer
 
-        $subfolders = Get-ChildItem -Path $category.FullName -Directory
+        $subfolders = Get-ChildItem -Path $category.FullName -Directory -ErrorAction SilentlyContinue
         foreach ($sub in $subfolders) {
-            $scriptFile = Get-ChildItem -Path $sub.FullName -Filter *.ps1 -File | Select-Object -First 1
-            if ($scriptFile) {
-                # --- CORREÇÃO: Alinhamento vertical consistente ---
-                $sp = New-Object System.Windows.Controls.StackPanel
-                $sp.Orientation = "Horizontal"
-                $sp.Margin = "0,0,0,8"
-                $sp.VerticalAlignment = "Top"
-                $sp.HorizontalAlignment = "Left"
-
-                $innerGrid = New-Object System.Windows.Controls.Grid
-                $innerGrid.Margin = "0"
-                $innerGrid.VerticalAlignment = "Center"
-                $innerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-                $innerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-                $innerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
-
-                $chk = New-Object System.Windows.Controls.CheckBox
-                $chk.VerticalAlignment = "Center"
-                $chk.Margin = "0,0,8,0"
-                $chk.Tag = $scriptFile.FullName
-                $ScriptCheckBoxes[$scriptFile.FullName] = $chk
-                [System.Windows.Controls.Grid]::SetColumn($chk, 0)
-
-                $btn = New-Object System.Windows.Controls.Button
-                $btn.Content = $sub.Name
-                $btn.Width = 200
-                $btn.Height = 32
-                $btn.Style = $roundedButtonStyle
-                $btn.Tag = $scriptFile.FullName
-                $btn.VerticalAlignment = "Center"
-                Add-HoverShadow $btn
-                [System.Windows.Controls.Grid]::SetColumn($btn, 1)
-
-                $infoBtn = New-Object System.Windows.Controls.Button
-                $infoBtn.Content = "?"
-                $infoBtn.Width = 28
-                $infoBtn.Height = 28
-                $infoBtn.Margin = "8,0,0,0"
-                $infoBtn.Style = $roundedButtonStyle
-                $infoBtn.Background = "#1E90FF"
-                $infoBtn.Tag = $scriptFile.FullName
-                $infoBtn.VerticalAlignment = "Center"
-                Add-HoverShadow $infoBtn
-                [System.Windows.Controls.Grid]::SetColumn($infoBtn, 2)
-
-                $innerGrid.Children.Add($chk)
-                $innerGrid.Children.Add($btn)
-                $innerGrid.Children.Add($infoBtn)
-                $sp.Children.Add($innerGrid)
-                $panel.Children.Add($sp)
-
-                $btn.Add_Click({ Run-ScriptElevated $this.Tag })
-                $infoBtn.Add_Click({
-                    $infoText = Get-InfoText $this.Tag
-                    Show-InfoWindow -title $sub.Name -content $infoText
-                })
+            # procura entrada no JSON para esse category/sub
+            $entry = $remote | Where-Object { $_.Category -eq $category.Name -and $_.Sub -eq $sub.Name } | Select-Object -First 1
+            if ($entry -and $entry.ScriptName) {
+                $scriptName = $entry.ScriptName
+            } else {
+                # se não houver entry, tenta detectar localmente um *.ps1
+                $localPs1 = Get-ChildItem -Path $sub.FullName -Filter *.ps1 -File -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($localPs1) { $scriptName = $localPs1.Name } else { continue }
             }
+
+            # --- UI build para cada subfolder ---
+            $sp = New-Object System.Windows.Controls.StackPanel
+            $sp.Orientation = "Horizontal"
+            $sp.Margin = "0,0,0,8"
+            $sp.VerticalAlignment = "Top"
+            $sp.HorizontalAlignment = "Left"
+
+            $innerGrid = New-Object System.Windows.Controls.Grid
+            $innerGrid.Margin = "0"
+            $innerGrid.VerticalAlignment = "Center"
+            $innerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+            $innerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+            $innerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+
+            # checkbox
+            $chk = New-Object System.Windows.Controls.CheckBox
+            $chk.VerticalAlignment = "Center"
+            $chk.Margin = "0,0,8,0"
+
+            $localPathExpected = Join-Path $sub.FullName $scriptName
+            $chk.Tag = $localPathExpected
+            $ScriptCheckBoxes[$localPathExpected] = $chk
+            [System.Windows.Controls.Grid]::SetColumn($chk, 0)
+
+            # botão principal
+            $btn = New-Object System.Windows.Controls.Button
+            $btn.Content = $sub.Name
+            $btn.Width = 200
+            $btn.Height = 32
+            $btn.Style = $roundedButtonStyle
+            $btn.Tag = [PSCustomObject]@{
+                Category = $category.Name
+                Sub = $sub.Name
+                ScriptName = $scriptName
+            }
+            $btn.VerticalAlignment = "Center"
+            Add-HoverShadow $btn
+            [System.Windows.Controls.Grid]::SetColumn($btn, 1)
+
+            # botão info
+            $infoBtn = New-Object System.Windows.Controls.Button
+            $infoBtn.Content = "?"
+            $infoBtn.Width = 28
+            $infoBtn.Height = 28
+            $infoBtn.Margin = "8,0,0,0"
+            $infoBtn.Style = $roundedButtonStyle
+            $infoBtn.Background = "#1E90FF"
+            $infoBtn.Tag = $btn.Tag
+            $infoBtn.VerticalAlignment = "Center"
+            Add-HoverShadow $infoBtn
+            [System.Windows.Controls.Grid]::SetColumn($infoBtn, 2)
+
+            $innerGrid.Children.Add($chk)
+            $innerGrid.Children.Add($btn)
+            $innerGrid.Children.Add($infoBtn)
+            $sp.Children.Add($innerGrid)
+            $panel.Children.Add($sp)
+
+            # Ao clicar: garante download e executa
+            $btn.Add_Click({
+                $meta = $this.Tag
+                if ($meta -and $meta.Category -and $meta.Sub -and $meta.ScriptName) {
+                    Ensure-ScriptLocalAndExecute -Category $meta.Category -Sub $meta.Sub -ScriptName $meta.ScriptName
+                } else {
+                    Add-Type -AssemblyName PresentationFramework
+                    [System.Windows.MessageBox]::Show("Script não encontrado.", "Erro", "OK", "Error")
+                }
+            })
+
+            # Info button: tenta mostrar .txt do raw, se não local
+            $infoBtn.Add_Click({
+                $meta = $this.Tag
+                $infoText = "Nenhuma documentação encontrada para este script."
+                try {
+                    if ($meta -and $meta.Category -and $meta.Sub -and $meta.ScriptName) {
+                        # monta URL do txt com escape por segmento
+                        $catEsc = [System.Uri]::EscapeDataString($meta.Category)
+                        $subEsc = [System.Uri]::EscapeDataString($meta.Sub)
+                        $txtName = [System.IO.Path]::ChangeExtension($meta.ScriptName, '.txt')
+                        $txtEsc = [System.Uri]::EscapeDataString($txtName)
+                        $rawTxtUrl = "$GitHubRawBase/$catEsc/$subEsc/$txtEsc"
+                        try {
+                            $content = Invoke-RestMethod -Uri $rawTxtUrl -Headers $Global:GitHubHeaders -ErrorAction Stop
+                            if ($null -ne $content) { $infoText = $content.ToString() }
+                        } catch {
+                            $candidateLocal = Join-Path $LocalCache ($meta.Category + "\" + $meta.Sub + "\" + [System.IO.Path]::ChangeExtension($meta.ScriptName, ".txt"))
+                            if (Test-Path $candidateLocal) { $infoText = Get-Content $candidateLocal -Raw }
+                        }
+                    }
+                } catch {}
+                Show-InfoWindow -title $meta.Sub -content $infoText
+            })
         }
 
         $tab.Content = $border
@@ -343,7 +607,7 @@ function Load-Tabs {
 }
 
 # ===============================
-# Rodapé
+# Rodapé (sem alterações funcionais)
 # ===============================
 $footerGrid = New-Object System.Windows.Controls.Grid
 $footerGrid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
@@ -386,7 +650,7 @@ $footerPanel.Children.Add($BtnExit)
 [System.Windows.Controls.Grid]::SetColumn($footerPanel, 0)
 $footerGrid.Children.Add($footerPanel)
 
-# --- Informações do sistema ---
+# Informações do sistema (direita)
 $infoText = New-Object System.Windows.Controls.TextBlock
 $infoText.HorizontalAlignment = "Right"
 $infoText.VerticalAlignment = "Center"
@@ -395,7 +659,7 @@ $infoText.FontSize = 12
 [System.Windows.Controls.Grid]::SetColumn($infoText, 1)
 $footerGrid.Children.Add($infoText)
 
-# Atualiza data/hora e nome do PC dinamicamente
+# Atualiza data/hora e nome do PC dinamicamente (timer)
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(1)
 $timer.Add_Tick({
@@ -412,20 +676,54 @@ $mainGrid.Children.Add($footerGrid)
 $BtnExec.Add_Click({
     $selected = $ScriptCheckBoxes.GetEnumerator() | Where-Object { $_.Value.IsChecked -eq $true } | ForEach-Object { $_.Key }
     if ($selected.Count -eq 0) {
+        Add-Type -AssemblyName PresentationFramework
         [System.Windows.MessageBox]::Show("Nenhum script selecionado.", "Aviso", "OK", "Warning") | Out-Null
         return
     }
     foreach ($script in $selected) {
-        Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"$script`"" -Verb RunAs -Wait
+        # se arquivo existe localmente, executa
+        if (Test-Path $script) {
+            Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"$script`"" -Verb RunAs -Wait
+        } else {
+            # tenta deduzir category/sub/script do caminho esperado e baixar/rodar
+            $rel = $script.Substring($LocalCache.Length).TrimStart('\','/')
+            $parts = $rel -split '[\\/]'
+            if ($parts.Count -ge 3) {
+                $category = $parts[0]
+                $sub = $parts[1]
+                $scriptName = $parts[2..($parts.Count-1)] -join '\'
+                Ensure-ScriptLocalAndExecute -Category $category -Sub $sub -ScriptName $scriptName
+            } else {
+                Write-Log "Execução em lote: caminho inválido $script"
+            }
+        }
     }
+    Add-Type -AssemblyName PresentationFramework
     [System.Windows.MessageBox]::Show("Execução concluída.", "GESET Launcher", "OK", "Information")
 })
 
-$BtnRefresh.Add_Click({ Load-Tabs })
+$BtnRefresh.Add_Click({
+    Write-Log "Atualização solicitada pelo usuário."
+    Load-Tabs
+})
+
 $BtnExit.Add_Click({ $window.Close() })
 
 # ===============================
 # Inicialização
+# - obtém structure.json, cria pastas locais e carrega as abas
 # ===============================
+try {
+    $jsonPath = Update-StructureJson
+    $remoteList = Get-StructureFromJson -jsonPath $jsonPath
+    if ($remoteList -and $remoteList.Count -gt 0) {
+        Ensure-LocalStructure -remoteList $remoteList
+    }
+} catch {
+    Write-Log "Erro na sincronização inicial: $($_.Exception.Message)"
+}
 Load-Tabs
 $window.ShowDialog() | Out-Null
+
+Write-Log "Launcher finalizado."
+# ===============================
