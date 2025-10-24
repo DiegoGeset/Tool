@@ -1,5 +1,7 @@
-﻿# ============================================
-# Instalação de Programas via Powershell (Winget)
-# Realiza a instalação dos seguintes programas na ordem enumerada.
-# 1. Google Chrome 2.Microsoft Office LTSC Professional 3.Anydesk 4.Java 8 5.Ccleaner 6.7-zip 7.Adobe Reader
+# ============================================
+# Script Pós Formatação - Instalação Automática
+# Realiza a instalação dos programas padrões de pós formatação
+# Programas : Google Chrome, Pacote Office, Anydesk, Ccleaner, Java 8, Adobe Reader.
+# Versões disponiveis do Pacote Office - 2016/2019/2021/2024
+# Autor: Diego Geset
 # ============================================
